@@ -1,0 +1,93 @@
+LeafOCR - changes and speed notes
+=================================
+Last updated: 2026-10-06
+Original code: git commit f353e38 (SFR-API repo). The version before the
+UI changes is kept as app.py.bak.
+
+
+1. CHANGES MADE TO SPEED UP OCR, AND WHY
+----------------------------------------
+
+a) Run on the GPU (RTX 4060 Laptop) through WSL Ubuntu
+   - What: a GPU Python environment (~/venvs/leafocr, TensorFlow 2.19.1 with
+     CUDA) inside WSL, plus launchers run_gpu.bat -> run_gpu_wsl.sh
+     (app on http://localhost:7860).
+   - Why: TensorFlow 2.11+ no longer supports GPUs on native Windows. The
+     only ways to use the RTX 4060 are WSL2 or Linux. DeepLabv3+ (469 MB)
+     and the CRNN are the slow parts, and both run on the GPU there.
+
+b) Smaller live preview while scanning (LIVE_MAX_SIDE = 1600 px)
+   - What: during a scan, the image with the green box is shrunk so its
+     longest side is at most 1600 px. The final view is full resolution.
+   - Why: the preview is redrawn and sent to the browser after every chunk.
+     On a big manuscript, sending the full-size image each time is slow.
+
+c) Galleries are sent once at the end, not after every chunk
+   - What: per chunk, only the scan image and the transcript are updated.
+     The "Recognized chunks" gallery is filled when the run ends (or on Stop).
+   - Why: the original resent every chunk image after every chunk, so the
+     data sent grew with the square of the number of chunks.
+
+Already fast in the original code (not changed):
+   - patches go to DeepLab together and the chunks of a line go to the
+     CRNN together (batching), and models are loaded once and reused.
+
+Not a speed change, but related:
+   - Segmentation now runs 4 patches at a time (SEG_BATCH = 4) so Stop can
+     take effect partway through. Measured below: this did NOT slow it down.
+
+
+2. CPU vs GPU TIMINGS (measured 2026-10-06)
+-------------------------------------------
+Same code (app.py), same images. CPU = Windows venv (newds_aug/.venv,
+TF 2.19). GPU = WSL venv on RTX 4060 Laptop. The "warm" columns are the
+average of 3 runs, measured after the models were loaded and one warm-up run.
+
+                                         CPU       GPU     GPU speed-up
+  One-time model loading                8.9 s    14.6 s    (slower)
+  First image after launch             10.4 s    25.9 s    (slower)
+  846_1_patch000.png       512x512      1.91 s    1.63 s    1.2x
+  MaI286_006_patch001.png  512x512      1.46 s    0.90 s    1.6x
+  846_62_patch000.png      512x512      1.81 s    1.19 s    1.5x
+  Large page 2048x1024 *                7.88 s    4.90 s    1.6x
+      (8 patches, 16 lines, 134 chunks)
+
+  * No full-size manuscript is in the project, so the large page is 8 sample
+    patches tiled 2x4 (a long, narrow palm-leaf shape).
+
+Segmentation batch size (large page):
+                                         CPU       GPU
+  4 patches per call (current)          7.88 s    4.90 s
+  all patches in one call               8.97 s    5.09 s
+  -> 4 at a time is as fast or faster, so Stop/Resume costs nothing.
+
+What the numbers mean:
+  - Once warm, the GPU is about 1.2x-1.6x faster per image. The gain is
+    largest on big pages.
+  - The GPU has a bigger start-up cost: about 40 s before the first result
+    (model load + first-run warm-up), compared with about 19 s on the CPU.
+    If you OCR only one or two small images per launch, the CPU version is
+    quicker overall. For a batch of images or large manuscripts, use the GPU.
+  - The GPU speed-up is modest. Other parts of the pipeline (line splitting,
+    chunking, drawing, updating the UI) run on the CPU either way. These
+    were not profiled separately.
+
+
+3. OTHER CHANGES (functionality, not speed)
+-------------------------------------------
+  - Model/vocab paths are relative to app.py (were hard-coded D:\sfr-system).
+  - run_palm_leaf_ocr.bat runs from its own folder using the local .venv.
+  - Two run buttons: Stop/Resume (one button slot) and Reset. The slot shows
+    "Stop" normally and switches to "Resume" while a run is paused. When
+    stopped, the green box stays on the last chunk that was read. Resume
+    continues from the next chunk, even in the middle of a line (or from the
+    last finished segmentation batch). The result is identical to an
+    uninterrupted run.
+  - While scanning, only the chunk being read is highlighted (green), both
+    on the image and in the transcript. Finished chunks are no longer
+    highlighted.
+  - Clicking a word in the transcript, or a chunk in the gallery, highlights
+    its block in orange on the image, shows a "Source region" crop, and
+    shows its line/chunk number and pixel coordinates in the status bar.
+  - The transcript is now clickable text, so a "Copy text" button and a
+    "Plain text" box were added for copying.
